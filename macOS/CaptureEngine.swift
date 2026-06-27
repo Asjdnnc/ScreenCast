@@ -8,8 +8,13 @@ class CaptureEngine: NSObject, ObservableObject, SCStreamOutput {
     @Published var currentFrame: CGImage?
     private var stream: SCStream?
     private let queue = DispatchQueue(label: "video-capture-queue")
+    private let encoder = VideoEncoder()
     
     func startCapture() async {
+        guard CGPreflightScreenCaptureAccess() else {
+            CGRequestScreenCaptureAccess()
+            return
+        }
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             guard let display = content.displays.first else { return }
@@ -23,6 +28,12 @@ class CaptureEngine: NSObject, ObservableObject, SCStreamOutput {
             
             stream = SCStream(filter: filter, configuration: config, delegate: nil)
             try stream?.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
+            
+            encoder.start(width: Int32(display.width), height: Int32(display.height))
+            encoder.onEncodedData = { data in
+                print("🎥 H.264 Frame Encoded! Size: \(data.count) bytes")
+            }
+            
             try await stream?.startCapture()
         } catch {
             print(error)
@@ -33,6 +44,7 @@ class CaptureEngine: NSObject, ObservableObject, SCStreamOutput {
         do {
             try await stream?.stopCapture()
             stream = nil
+            encoder.stop()
         } catch {
             print(error)
         }
@@ -40,6 +52,9 @@ class CaptureEngine: NSObject, ObservableObject, SCStreamOutput {
     
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen else { return }
+        
+        encoder.encode(sampleBuffer: sampleBuffer)
+        
         guard let imageBuffer = sampleBuffer.imageBuffer else { return }
         
         var cgImage: CGImage?
