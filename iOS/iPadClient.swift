@@ -2,11 +2,152 @@ import Foundation
 import Network
 import SwiftUI
 import Combine
+import AVFoundation
+import VideoToolbox
+
+class VideoDecoder {
+    private var formatDescription: CMVideoFormatDescription?
+    let displayLayer: AVSampleBufferDisplayLayer
+    
+    init(displayLayer: AVSampleBufferDisplayLayer) {
+        self.displayLayer = displayLayer
+    }
+    
+    func decode(frameData: Data) {
+        var sps: [UInt8]?
+        var pps: [UInt8]?
+        var naluOffsets: [Int] = []
+        
+        var i = 0
+        while i < frameData.count - 4 {
+            if frameData[i] == 0 && frameData[i+1] == 0 && frameData[i+2] == 0 && frameData[i+3] == 1 {
+                naluOffsets.append(i)
+                i += 4
+            } else if frameData[i] == 0 && frameData[i+1] == 0 && frameData[i+2] == 1 {
+                naluOffsets.append(i)
+                i += 3
+            } else {
+                i += 1
+            }
+        }
+        
+        var bodyData = Data()
+        
+        for index in 0..<naluOffsets.count {
+            let start = naluOffsets[index]
+            let end = (index + 1 < naluOffsets.count) ? naluOffsets[index + 1] : frameData.count
+            
+            let startCodeLength = (frameData[start + 2] == 1) ? 3 : 4
+            let naluData = frameData.subdata(in: (start + startCodeLength)..<end)
+            guard !naluData.isEmpty else { continue }
+            
+            let naluType = naluData[0] & 0x1F
+            
+            if naluType == 7 {
+                sps = [UInt8](naluData)
+            } else if naluType == 8 {
+                pps = [UInt8](naluData)
+            } else {
+                var length = UInt32(naluData.count).bigEndian
+                bodyData.append(Data(bytes: &length, count: 4))
+                bodyData.append(naluData)
+            }
+        }
+        
+        if let sps = sps, let pps = pps {
+            let spsPointer = UnsafePointer<UInt8>(sps)
+            let ppsPointer = UnsafePointer<UInt8>(pps)
+            
+            var parameterSetPointers = [spsPointer, ppsPointer]
+            var parameterSetSizes = [sps.count, pps.count]
+            
+            let status = CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                allocator: kCFAllocatorDefault,
+                parameterSetCount: 2,
+                parameterSetPointers: &parameterSetPointers,
+                parameterSetSizes: &parameterSetSizes,
+                nalUnitHeaderLength: 4,
+                formatDescriptionOut: &formatDescription
+            )
+            
+            if status != noErr {
+                print("Failed to create format description: \(status)")
+                return
+            }
+        }
+        
+        guard let formatDescription = formatDescription, !bodyData.isEmpty else { return }
+        
+        var blockBuffer: CMBlockBuffer?
+        let totalSize = bodyData.count
+        
+        var status = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: totalSize,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: totalSize,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
+        
+        guard status == noErr, let buffer = blockBuffer else {
+            print("Failed to create block buffer: \(status)")
+            return
+        }
+        
+        bodyData.withUnsafeBytes { rawBufferPointer in
+            if let baseAddress = rawBufferPointer.baseAddress {
+                CMBlockBufferReplaceDataBytes(
+                    with: baseAddress,
+                    blockBuffer: buffer,
+                    offsetIntoDestination: 0,
+                    dataLength: totalSize
+                )
+            }
+        }
+        
+        var sampleBuffer: CMSampleBuffer?
+        var sampleSizeArray = [totalSize]
+        
+        status = CMSampleBufferCreateReady(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: buffer,
+            formatDescription: formatDescription,
+            sampleCount: 1,
+            sampleTimingEntryCount: 0,
+            sampleTimingArray: nil,
+            sampleSizeEntryCount: 1,
+            sampleSizeArray: &sampleSizeArray,
+            sampleBufferOut: &sampleBuffer
+        )
+        
+        guard status == noErr, let sb = sampleBuffer else {
+            print("Failed to create sample buffer: \(status)")
+            return
+        }
+        
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: true) {
+            let dict = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
+            CFDictionarySetValue(dict,
+                                 Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
+                                 Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
+        }
+        
+        if displayLayer.isReadyForMoreMediaData {
+            displayLayer.enqueue(sb)
+        } else {
+            print("Display layer not ready for more media data")
+        }
+    }
+}
 
 class IPadClient: ObservableObject {
     private var connection: NWConnection?
-    @Published var messages: [String] = []
     @Published var status: String = "Disconnected"
+    var decoder: VideoDecoder?
     
     func connect(host: String, port: UInt16) {
         let nwHost = NWEndpoint.Host(host)
@@ -36,44 +177,82 @@ class IPadClient: ObservableObject {
         connection = nil
     }
     
-    func send(message: String) {
-        guard let connection = connection else { return }
-        let data = (message + "\n").data(using: .utf8) ?? Data()
-        connection.send(content: data, completion: .contentProcessed { [weak self] error in
-            if let error = error {
-                DispatchQueue.main.async {
-                    self?.messages.append("Send failed: \(error.localizedDescription)")
-                }
-            }
-        })
-    }
-    
     private func receive() {
         guard let connection = connection else { return }
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
-            if let data = data, !data.isEmpty {
-                if let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) {
-                    DispatchQueue.main.async {
-                        self?.messages.append("Server: \(message)")
-                    }
+        connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] data, _, isComplete, error in
+            if let data = data, data.count == 4 {
+                let length = data.withUnsafeBytes { buffer -> UInt32 in
+                    let bytes = buffer.bindMemory(to: UInt8.self)
+                    return (UInt32(bytes[0]) << 24) |
+                           (UInt32(bytes[1]) << 16) |
+                           (UInt32(bytes[2]) << 8)  |
+                           UInt32(bytes[3])
                 }
-            }
-            if isComplete {
-                DispatchQueue.main.async {
-                    self?.status = "Disconnected by server"
-                    self?.connection = nil
-                }
+                self?.receiveFrame(length: Int(length))
+            } else if isComplete {
+                self?.handleDisconnect()
             } else if error == nil {
                 self?.receive()
             }
         }
     }
+    
+    private func receiveFrame(length: Int) {
+        guard let connection = connection else { return }
+        connection.receive(minimumIncompleteLength: length, maximumLength: length) { [weak self] data, _, isComplete, error in
+            if let data = data, data.count == length {
+                self?.decoder?.decode(frameData: data)
+                self?.receive()
+            } else if isComplete {
+                self?.handleDisconnect()
+            } else if error == nil {
+                self?.receive()
+            }
+        }
+    }
+    
+    private func handleDisconnect() {
+        DispatchQueue.main.async {
+            self.status = "Disconnected"
+            self.connection = nil
+        }
+    }
 }
 
-struct ClientView: View {
+class AVSampleBufferDisplayUIView: UIView {
+    private let videoLayer: AVSampleBufferDisplayLayer
+    
+    init(videoLayer: AVSampleBufferDisplayLayer) {
+        self.videoLayer = videoLayer
+        super.init(frame: .zero)
+        videoLayer.videoGravity = .resizeAspect
+        layer.addSublayer(videoLayer)
+    }
+    
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+    
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        videoLayer.frame = bounds
+    }
+}
+
+struct VideoDisplayView: UIViewRepresentable {
+    let videoLayer: AVSampleBufferDisplayLayer
+    
+    func makeUIView(context: Context) -> AVSampleBufferDisplayUIView {
+        return AVSampleBufferDisplayUIView(videoLayer: videoLayer)
+    }
+    
+    func updateUIView(_ uiView: AVSampleBufferDisplayUIView, context: Context) {}
+}
+
+struct ContentView: View {
     @StateObject private var client = IPadClient()
     @State private var hostAddress: String = "192.168.1.10"
-    @State private var textToSend: String = ""
+    private let displayLayer = AVSampleBufferDisplayLayer()
     
     var body: some View {
         VStack(spacing: 20) {
@@ -91,6 +270,7 @@ struct ClientView: View {
                     .autocapitalization(.none)
                 
                 Button("Connect") {
+                    client.decoder = VideoDecoder(displayLayer: displayLayer)
                     client.connect(host: hostAddress, port: 12345)
                 }
                 .disabled(client.status == "Connected")
@@ -101,31 +281,10 @@ struct ClientView: View {
                 .disabled(client.status != "Connected")
             }
             
-            Divider()
-            
-            ScrollView {
-                VStack(alignment: .leading, spacing: 5) {
-                    ForEach(client.messages, id: \.self) { message in
-                        Text(message)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal)
-                    }
-                }
-            }
-            .frame(height: 150)
-            .background(Color.secondary.opacity(0.1))
-            .cornerRadius(8)
-            
-            HStack {
-                TextField("Message", text: $textToSend)
-                    .textFieldStyle(.roundedBorder)
-                
-                Button("Send Ping") {
-                    client.send(message: textToSend.isEmpty ? "Ping" : textToSend)
-                    textToSend = ""
-                }
-                .disabled(client.status != "Connected")
-            }
+            VideoDisplayView(videoLayer: displayLayer)
+                .background(Color.black)
+                .cornerRadius(12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .padding()
     }
