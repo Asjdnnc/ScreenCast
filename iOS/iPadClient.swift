@@ -279,15 +279,180 @@ struct VideoDisplayView: UIViewRepresentable {
     func updateUIView(_ uiView: AVSampleBufferDisplayUIView, context: Context) {}
 }
 
+struct BlurView: UIViewRepresentable {
+    let style: UIBlurEffect.Style
+    func makeUIView(context: Context) -> UIVisualEffectView {
+        UIVisualEffectView(effect: UIBlurEffect(style: style))
+    }
+    func updateUIView(_ uiView: UIVisualEffectView, context: Context) {}
+}
+
+struct MonitorLogoView: View {
+    var size: CGFloat = 80
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: size * 0.15, style: .continuous)
+                .stroke(
+                    LinearGradient(colors: [Color.blue, Color.purple], startPoint: .topLeading, endPoint: .bottomTrailing),
+                    lineWidth: size * 0.06
+                )
+                .frame(width: size, height: size * 0.72)
+                .shadow(color: Color.blue.opacity(0.3), radius: 5, x: 0, y: 3)
+            
+            VStack(spacing: 0) {
+                Spacer()
+                Rectangle()
+                    .fill(LinearGradient(colors: [Color.blue, Color.purple], startPoint: .leading, endPoint: .trailing))
+                    .frame(width: size * 0.12, height: size * 0.18)
+                RoundedRectangle(cornerRadius: size * 0.03, style: .continuous)
+                    .fill(LinearGradient(colors: [Color.blue, Color.purple], startPoint: .leading, endPoint: .trailing))
+                    .frame(width: size * 0.36, height: size * 0.06)
+            }
+            .frame(width: size, height: size * 0.92)
+            
+            Text("S")
+                .font(.system(size: size * 0.42, weight: .black, design: .rounded))
+                .foregroundStyle(
+                    LinearGradient(colors: [Color.blue, Color.purple], startPoint: .topLeading, endPoint: .bottomTrailing)
+                )
+                .offset(y: -size * 0.04)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+struct CastingPulseView: View {
+    @State private var scale: CGFloat = 1.0
+    @State private var opacity: Double = 0.5
+    
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(LinearGradient(colors: [.blue, .purple], startPoint: .top, endPoint: .bottom), lineWidth: 2)
+                .scaleEffect(scale)
+                .opacity(opacity)
+                .frame(width: 160, height: 160)
+                .onAppear {
+                    withAnimation(.easeOut(duration: 2.0).repeatForever(autoreverses: false)) {
+                        scale = 2.0
+                        opacity = 0.0
+                    }
+                }
+            
+            Circle()
+                .stroke(LinearGradient(colors: [.purple, .blue], startPoint: .top, endPoint: .bottom), lineWidth: 1.5)
+                .scaleEffect(scale - 0.3)
+                .opacity(opacity)
+                .frame(width: 160, height: 160)
+                .onAppear {
+                    withAnimation(.easeOut(duration: 2.0).delay(0.6).repeatForever(autoreverses: false)) {
+                        scale = 2.0
+                        opacity = 0.0
+                    }
+                }
+        }
+    }
+}
+
+struct InfoSheet: View {
+    @Environment(\.dismiss) var dismiss
+    
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 20) {
+                HStack {
+                    Spacer()
+                    Button(action: {
+                        dismiss()
+                    }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title2)
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                
+                Image("AppLogo")
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 80, height: 80)
+                    .cornerRadius(16)
+                    .shadow(radius: 4)
+                
+                Text("ScreenCast")
+                    .font(.title2)
+                    .bold()
+                
+                Text("Developer: Aditya Kumar")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                
+                Divider()
+                
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("System Architecture")
+                        .font(.headline)
+                        .padding(.bottom, 4)
+                    
+                    VStack(alignment: .leading, spacing: 8) {
+                        bulletPoint(title: "Transport Layer", desc: "Low-latency Apple Network framework sockets optimized for Lightning USB wired connections.")
+                        bulletPoint(title: "Display Engine", desc: "Virtual display creation via macOS 14+ CGVirtualDisplay API matching iPad native dimensions.")
+                        bulletPoint(title: "Video Pipeline", desc: "Real-time frame capture using ScreenCaptureKit linked directly to a VideoToolbox H.264 hardware encoding session.")
+                        bulletPoint(title: "Receiver & Render", desc: "Client-side H.264 hardware decoding via VideoToolbox, rendered fluently using AVSampleBufferDisplayLayer.")
+                        bulletPoint(title: "Input Loop", desc: "Multi-touch gesture processing mapping normalized iPad coordinates back to macOS CoreGraphics system mouse events.")
+                    }
+                }
+                
+                Divider()
+                
+                Link(destination: URL(string: "https://github.com/Asjdnnc/ScreenCast")!) {
+                    HStack {
+                        Image(systemName: "link")
+                        Text("GitHub Repository")
+                            .bold()
+                    }
+                    .foregroundColor(.blue)
+                }
+                .padding(.top, 8)
+            }
+            .padding(24)
+        }
+        .frame(maxWidth: 420)
+    }
+    
+    private func bulletPoint(title: String, desc: String) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Text("•")
+                .bold()
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .bold))
+                Text(desc)
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+}
+
 struct ContentView: View {
     @StateObject private var client = IPadClient()
     @State private var hostAddress: String = "192.168.1.10"
     @State private var showWiFiInput: Bool = false
-    @State private var showMenu: Bool = false
+    @State private var isPencilMode: Bool = false
+    @State private var showControlBar: Bool = true
+    @State private var keyboardInput: String = " "
+    @FocusState private var isKeyboardFocused: Bool
+    @State private var logoScale: CGFloat = 1.0
+    @State private var showInfo = false
+    
+    @State private var autoHideTimer: Timer?
     private let displayLayer = AVSampleBufferDisplayLayer()
     
     var body: some View {
-        ZStack(alignment: .leading) {
+        ZStack {
+            Color.black.edgesIgnoringSafeArea(.all)
+            
             GeometryReader { geometry in
                 VideoDisplayView(videoLayer: displayLayer)
                     .background(Color.black)
@@ -295,144 +460,320 @@ struct ContentView: View {
                     .gesture(
                         DragGesture(minimumDistance: 0, coordinateSpace: .local)
                             .onChanged { value in
-                                let eventType: UInt8 = value.translation == .zero ? 1 : 3
-                                sendTouch(at: value.location, in: geometry.size, type: eventType)
+                                triggerActivity()
+                                if !isPencilMode {
+                                    if value.translation == .zero {
+                                        sendTouch(at: value.location, in: geometry.size, type: 1)
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                            sendTouch(at: value.location, in: geometry.size, type: 2)
+                                        }
+                                    } else {
+                                        sendTouch(at: value.location, in: geometry.size, type: 0)
+                                    }
+                                } else {
+                                    let eventType: UInt8 = value.translation == .zero ? 1 : 3
+                                    sendTouch(at: value.location, in: geometry.size, type: eventType)
+                                }
                             }
                             .onEnded { value in
-                                sendTouch(at: value.location, in: geometry.size, type: 2)
+                                triggerActivity()
+                                if isPencilMode {
+                                    sendTouch(at: value.location, in: geometry.size, type: 2)
+                                }
                             }
                     )
+                    .onTapGesture {
+                        triggerActivity()
+                    }
             }
             .edgesIgnoringSafeArea(.all)
             
-            if client.status == "Connected" {
-                VStack {
-                    Spacer()
-                    HStack {
-                        Button(action: {
-                            withAnimation {
-                                showMenu.toggle()
-                            }
-                        }) {
-                            Image(systemName: "line.3.horizontal")
-                                .font(.title)
-                                .padding()
-                                .background(Color.black.opacity(0.6))
-                                .foregroundColor(.white)
-                                .clipShape(Circle())
+            TextField("", text: $keyboardInput)
+                .focused($isKeyboardFocused)
+                .opacity(0)
+                .frame(width: 1, height: 1)
+                .keyboardType(.default)
+                .autocapitalization(.none)
+                .disableAutocorrection(true)
+                .onChange(of: keyboardInput) { newValue in
+                    if newValue.isEmpty {
+                        var chars: UInt16 = 0x007F
+                        var packet = Data()
+                        packet.append(11)
+                        packet.append(Data(bytes: &chars, count: 2))
+                        packet.append(Data(repeating: 0, count: 6))
+                        client.send(data: packet)
+                    } else if newValue.count > 1 {
+                        if let char = newValue.last {
+                            let utf16Val = char.utf16.first!
+                            var packet = Data()
+                            packet.append(11)
+                            var val = utf16Val
+                            packet.append(Data(bytes: &val, count: 2))
+                            packet.append(Data(repeating: 0, count: 6))
+                            client.send(data: packet)
                         }
-                        .padding()
-                        Spacer()
                     }
+                    keyboardInput = " "
                 }
-            }
             
-            if client.status != "Connected" || showMenu {
-                Color.black.opacity(0.4)
+            if client.status != "Connected" {
+                LinearGradient(colors: [Color(white: 0.08), Color(white: 0.03)], startPoint: .top, endPoint: .bottom)
                     .edgesIgnoringSafeArea(.all)
-                    .onTapGesture {
-                        if client.status == "Connected" {
-                            withAnimation {
-                                showMenu = false
-                            }
-                        }
-                    }
                 
-                VStack(spacing: 20) {
-                    Text("ScreenCast")
-                        .font(.title)
-                        .bold()
-                    
-                    Text("Status: \(client.status)")
-                        .foregroundColor(.secondary)
+                VStack(spacing: 30) {
+                    Spacer()
                     
                     VStack(spacing: 12) {
+                        Image("AppLogo")
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: 90, height: 90)
+                            .cornerRadius(18)
+                            .shadow(color: Color.blue.opacity(0.3), radius: 8, x: 0, y: 4)
+                            .scaleEffect(logoScale)
+                            .onAppear {
+                                withAnimation(.spring(response: 0.6, dampingFraction: 0.6).repeatForever(autoreverses: true)) {
+                                    logoScale = 1.05
+                                }
+                            }
+                        
+                        Text("ScreenCast")
+                            .font(.system(size: 32, weight: .bold, design: .rounded))
+                            .foregroundStyle(.linearGradient(colors: [.white, .white.opacity(0.8)], startPoint: .top, endPoint: .bottom))
+                        
+                        Text("VIRTUAL DISPLAY CONTROLLER")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.blue)
+                            .tracking(3)
+                    }
+                    
+                    VStack(spacing: 6) {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(client.status.contains("Discovering") ? Color.orange : Color.blue)
+                                .frame(width: 6, height: 6)
+                            Text(client.status)
+                                .font(.system(size: 13, weight: .medium, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .background(Color.white.opacity.opacity(0.04))
+                        .cornerRadius(20)
+                    }
+                    
+                    Spacer()
+                    
+                    VStack(spacing: 16) {
                         Button(action: {
                             client.status = "Discovering USB..."
                             client.discoverAndConnect(preferUSB: true) { endpoint in
                                 client.decoder = VideoDecoder(displayLayer: displayLayer)
                                 client.connect(to: endpoint)
-                                withAnimation { showMenu = false }
+                                triggerActivity()
                             }
                         }) {
-                            HStack {
+                            HStack(spacing: 10) {
                                 Image(systemName: "cable.connector")
                                 Text("Connect via USB Cable")
-                                    .bold()
+                                    .font(.system(size: 16, weight: .semibold))
                             }
                             .frame(maxWidth: .infinity)
                             .padding()
-                            .background(Color.blue)
+                            .background(LinearGradient(colors: [.blue, .purple], startPoint: .leading, endPoint: .trailing))
                             .foregroundColor(.white)
-                            .cornerRadius(10)
+                            .cornerRadius(14)
+                            .shadow(color: Color.blue.opacity(0.3), radius: 10, y: 5)
                         }
                         
                         Button(action: {
-                            withAnimation {
+                            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                                 showWiFiInput.toggle()
                             }
                         }) {
-                            HStack {
+                            HStack(spacing: 10) {
                                 Image(systemName: "wifi")
                                 Text("Connect via Wi-Fi")
-                                    .bold()
+                                    .font(.system(size: 16, weight: .semibold))
                             }
                             .frame(maxWidth: .infinity)
                             .padding()
-                            .background(Color.secondary.opacity(0.15))
-                            .foregroundColor(.primary)
-                            .cornerRadius(10)
+                            .background(Color.white.opacity(0.05))
+                            .foregroundColor(.white)
+                            .cornerRadius(14)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14)
+                                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                            )
                         }
                         
                         if showWiFiInput {
-                            HStack {
-                                TextField("Mac Wi-Fi IP Address", text: $hostAddress)
-                                    .keyboardType(.numbersAndPunctuation)
-                                    .textFieldStyle(.roundedBorder)
-                                    .autocapitalization(.none)
-                                
-                                Button(action: {
-                                    client.decoder = VideoDecoder(displayLayer: displayLayer)
-                                    let host = NWEndpoint.Host(hostAddress)
-                                    let port = NWEndpoint.Port(rawValue: 12345)!
-                                    client.connect(to: .hostPort(host: host, port: port))
-                                    withAnimation { showMenu = false }
-                                }) {
-                                    Text("Connect")
-                                        .bold()
+                            VStack(spacing: 12) {
+                                HStack {
+                                    TextField("Mac IP Address", text: $hostAddress)
+                                        .keyboardType(.numbersAndPunctuation)
+                                        .textFieldStyle(.plain)
+                                        .padding()
+                                        .background(Color.white.opacity(0.04))
+                                        .cornerRadius(10)
+                                        .foregroundColor(.white)
+                                        .autocapitalization(.none)
+                                    
+                                    Button(action: {
+                                        client.decoder = VideoDecoder(displayLayer: displayLayer)
+                                        let host = NWEndpoint.Host(hostAddress)
+                                        let port = NWEndpoint.Port(rawValue: 12345)!
+                                        client.connect(to: .hostPort(host: host, port: port))
+                                        triggerActivity()
+                                    }) {
+                                        Text("Connect")
+                                            .font(.system(size: 15, weight: .bold))
+                                            .padding(.horizontal, 20)
+                                            .padding(.vertical, 12)
+                                            .background(Color.blue)
+                                            .foregroundColor(.white)
+                                            .cornerRadius(10)
+                                    }
                                 }
-                                .padding(.horizontal)
                             }
-                            .padding(.top, 5)
-                            .transition(.opacity)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
                         }
                     }
-                    
-                    if client.status == "Connected" {
-                        Button(action: {
-                            client.disconnect()
-                            withAnimation { showMenu = false }
-                        }) {
-                            HStack {
-                                Image(systemName: "power")
-                                Text("Disconnect")
-                                    .bold()
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding()
-                            .background(Color.red)
-                            .foregroundColor(.white)
-                            .cornerRadius(10)
-                        }
-                    }
+                    .frame(maxWidth: 340)
+                    .padding(.bottom, 50)
                 }
                 .padding()
-                .frame(width: 320)
-                .background(Color(UIColor.systemBackground))
-                .cornerRadius(16)
-                .shadow(radius: 10)
-                .padding()
-                .transition(.move(edge: .leading))
+            }
+            
+            if client.status == "Connected" {
+                VStack {
+                    Spacer()
+                    if showControlBar {
+                        HStack(spacing: 24) {
+                            Button(action: {
+                                isPencilMode = false
+                                triggerActivity()
+                            }) {
+                                VStack(spacing: 4) {
+                                    Image(systemName: "hand.tap")
+                                        .font(.title3)
+                                    Text("Mouse")
+                                        .font(.system(size: 9, weight: .bold))
+                                }
+                                .foregroundColor(!isPencilMode ? .blue : .white.opacity(0.6))
+                            }
+                            
+                            Button(action: {
+                                isPencilMode = true
+                                triggerActivity()
+                            }) {
+                                VStack(spacing: 4) {
+                                    Image(systemName: "pencil")
+                                        .font(.title3)
+                                    Text("Pencil")
+                                        .font(.system(size: 9, weight: .bold))
+                                }
+                                .foregroundColor(isPencilMode ? .blue : .white.opacity(0.6))
+                            }
+                            
+                            Button(action: {
+                                isKeyboardFocused.toggle()
+                                triggerActivity()
+                            }) {
+                                VStack(spacing: 4) {
+                                    Image(systemName: "keyboard")
+                                        .font(.title3)
+                                    Text("Keyboard")
+                                        .font(.system(size: 9, weight: .bold))
+                                }
+                                .foregroundColor(isKeyboardFocused ? .blue : .white.opacity(0.6))
+                            }
+                            
+                            Divider()
+                                .frame(height: 30)
+                                .background(Color.white.opacity(0.2))
+                            
+                            Button(action: {
+                                client.disconnect()
+                            }) {
+                                VStack(spacing: 4) {
+                                    Image(systemName: "power")
+                                        .font(.title3)
+                                    Text("Disconnect")
+                                        .font(.system(size: 9, weight: .bold))
+                                }
+                                .foregroundColor(.red)
+                            }
+                        }
+                        .padding(.horizontal, 32)
+                        .padding(.vertical, 12)
+                        .background(Color.black.opacity(0.65))
+                        .background(BlurView(style: .systemUltraThinMaterialDark))
+                        .cornerRadius(28)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 28)
+                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                        )
+                        .shadow(color: Color.black.opacity(0.4), radius: 15, y: 8)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .padding(.bottom, 24)
+                    } else {
+                        Button(action: {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                                showControlBar = true
+                            }
+                            triggerActivity()
+                        }) {
+                            Image(systemName: "chevron.up")
+                                .font(.system(size: 16, weight: .bold))
+                                .padding(.horizontal, 24)
+                                .padding(.vertical, 8)
+                                .background(Color.black.opacity(0.5))
+                                .background(BlurView(style: .systemUltraThinMaterialDark))
+                                .foregroundColor(.white.opacity(0.8))
+                                .cornerRadius(16)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 16)
+                                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                                )
+                        }
+                        .padding(.bottom, 12)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                }
+            }
+            
+            if client.status != "Connected" {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Button(action: {
+                            showInfo = true
+                        }) {
+                            Image(systemName: "info.circle")
+                                .font(.title2)
+                                .foregroundColor(.white.opacity(0.6))
+                        }
+                        .padding(24)
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showInfo) {
+            InfoSheet()
+        }
+    }
+    
+    private func triggerActivity() {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+            showControlBar = true
+        }
+        autoHideTimer?.invalidate()
+        autoHideTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { _ in
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                showControlBar = false
             }
         }
     }

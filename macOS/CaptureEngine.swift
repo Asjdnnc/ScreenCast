@@ -73,6 +73,7 @@ class MacServer: ObservableObject {
     @Published var connection: NWConnection?
     @Published var status: String = "Stopped"
     var onConnectionReady: (() -> Void)?
+    var activeDisplayID: CGDirectDisplayID?
     
     let port: NWEndpoint.Port = 12345
     private var udpListener: NWListener?
@@ -158,6 +159,12 @@ class MacServer: ObservableObject {
         connection.start(queue: .main)
     }
     
+    func disconnect() {
+        connection?.cancel()
+        connection = nil
+        status = "Listening on port \(port.rawValue)"
+    }
+    
     private func receive() {
         guard let connection = connection else { return }
         connection.receive(minimumIncompleteLength: 9, maximumLength: 9) { [weak self] data, _, isComplete, error in
@@ -180,10 +187,31 @@ class MacServer: ObservableObject {
         let xNorm = xBytes.withUnsafeBytes { $0.load(as: Float.self) }
         let yNorm = yBytes.withUnsafeBytes { $0.load(as: Float.self) }
         
-        guard let mainDisplay = NSScreen.main else { return }
-        let screenFrame = mainDisplay.frame
-        let targetX = CGFloat(xNorm) * screenFrame.width
-        let targetY = CGFloat(yNorm) * screenFrame.height
+        var targetX: CGFloat = 0
+        var targetY: CGFloat = 0
+        
+        if let displayID = activeDisplayID,
+           let screen = NSScreen.screens.first(where: {
+               ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == displayID
+           }) {
+            let frame = screen.frame
+            if let primaryScreen = NSScreen.screens.first {
+                let primaryHeight = primaryScreen.frame.height
+                let cgOriginX = frame.minX
+                let cgOriginY = primaryHeight - frame.maxY
+                targetX = cgOriginX + CGFloat(xNorm) * frame.width
+                targetY = cgOriginY + CGFloat(yNorm) * frame.height
+            } else {
+                targetX = CGFloat(xNorm) * frame.width
+                targetY = CGFloat(yNorm) * frame.height
+            }
+        } else {
+            if let mainDisplay = NSScreen.main {
+                let screenFrame = mainDisplay.frame
+                targetX = CGFloat(xNorm) * screenFrame.width
+                targetY = CGFloat(yNorm) * screenFrame.height
+            }
+        }
         let point = CGPoint(x: targetX, y: targetY)
         
         let source = CGEventSource(stateID: .combinedSessionState)
@@ -201,6 +229,23 @@ class MacServer: ObservableObject {
         case 3:
             let event = CGEvent(mouseEventSource: source, mouseType: .leftMouseDragged, mouseCursorPosition: point, mouseButton: .left)
             event?.post(tap: .cghidEventTap)
+        case 11:
+            let charCode = data.subdata(in: 1..<3).withUnsafeBytes { $0.load(as: UInt16.self) }
+            var chars = [charCode]
+            if charCode == 0x007F {
+                let eventDown = CGEvent(keyboardEventSource: source, virtualKey: 51, keyDown: true)
+                eventDown?.post(tap: .cghidEventTap)
+                let eventUp = CGEvent(keyboardEventSource: source, virtualKey: 51, keyDown: false)
+                eventUp?.post(tap: .cghidEventTap)
+            } else {
+                let eventDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
+                eventDown?.keyboardSetUnicodeString(stringLength: 1, unicodeString: &chars)
+                eventDown?.post(tap: .cghidEventTap)
+                
+                let eventUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+                eventUp?.keyboardSetUnicodeString(stringLength: 1, unicodeString: &chars)
+                eventUp?.post(tap: .cghidEventTap)
+            }
         default:
             break
         }
@@ -235,6 +280,7 @@ class CaptureEngine: NSObject, ObservableObject, SCStreamOutput {
             print("🖥️ CaptureEngine: No displayID returned from displayManager")
             return
         }
+        server?.activeDisplayID = virtualDisplayID
         print("🖥️ CaptureEngine: Virtual display ID is \(virtualDisplayID). Querying SCShareableContent...")
         
         do {
@@ -282,6 +328,7 @@ class CaptureEngine: NSObject, ObservableObject, SCStreamOutput {
             stream = nil
             encoder.stop()
             displayManager.destroyDisplay()
+            server?.activeDisplayID = nil
         } catch {
             print(error)
         }
@@ -326,106 +373,193 @@ func getLocalIPAddresses() -> [String] {
     return addresses
 }
 
+struct InfoSheet: View {
+    @Environment(\.dismiss) var dismiss
+    
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 20) {
+                HStack {
+                    Spacer()
+                    Button(action: {
+                        dismiss()
+                    }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title2)
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                
+                Image("AppLogo")
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 80, height: 80)
+                    .cornerRadius(16)
+                    .shadow(radius: 4)
+                
+                Text("ScreenCast")
+                    .font(.title2)
+                    .bold()
+                
+                Text("Developer: Aditya Kumar")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                
+                Divider()
+                
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("System Architecture")
+                        .font(.headline)
+                        .padding(.bottom, 4)
+                    
+                    VStack(alignment: .leading, spacing: 8) {
+                        bulletPoint(title: "Transport Layer", desc: "Low-latency Apple Network framework sockets optimized for Lightning USB wired connections.")
+                        bulletPoint(title: "Display Engine", desc: "Virtual display creation via macOS 14+ CGVirtualDisplay API matching iPad native dimensions.")
+                        bulletPoint(title: "Video Pipeline", desc: "Real-time frame capture using ScreenCaptureKit linked directly to a VideoToolbox H.264 hardware encoding session.")
+                        bulletPoint(title: "Receiver & Render", desc: "Client-side H.264 hardware decoding via VideoToolbox, rendered fluently using AVSampleBufferDisplayLayer.")
+                        bulletPoint(title: "Input Loop", desc: "Multi-touch gesture processing mapping normalized iPad coordinates back to macOS CoreGraphics system mouse events.")
+                    }
+                }
+                
+                Divider()
+                
+                Link(destination: URL(string: "https://github.com/Asjdnnc/ScreenCast")!) {
+                    HStack {
+                        Image(systemName: "link")
+                        Text("GitHub Repository")
+                            .bold()
+                    }
+                    .foregroundColor(.blue)
+                }
+                .padding(.top, 8)
+            }
+            .padding(24)
+        }
+        .frame(width: 550, height: 500)
+    }
+    
+    private func bulletPoint(title: String, desc: String) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Text("•")
+                .bold()
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .bold))
+                Text(desc)
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+}
+
 struct MirrorView: View {
     @StateObject private var server = MacServer()
     @StateObject private var engine = CaptureEngine()
     @State private var localIPs: [String] = []
+    @State private var logoScale: CGFloat = 1.0
+    @State private var showInfo = false
     
     var body: some View {
-        VStack(spacing: 24) {
-            VStack(spacing: 6) {
-                Text("ScreenCast")
-                    .font(.system(size: 26, weight: .bold, design: .rounded))
-                    .foregroundStyle(.linearGradient(colors: [.primary, .secondary], startPoint: .top, endPoint: .bottom))
-                Text("VIRTUAL DISPLAY CONTROLLER")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(.secondary)
-                    .tracking(2)
-            }
-            
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 8, height: 8)
-                Text(server.status)
-                    .font(.system(size: 13, weight: .medium, design: .monospaced))
-                    .foregroundColor(.secondary)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(Color.secondary.opacity(0.08))
-            .cornerRadius(20)
-            
-            if !localIPs.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("AVAILABLE INTERFACES")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(.secondary)
-                        .tracking(1)
+        ZStack(alignment: .topTrailing) {
+            VStack(spacing: 24) {
+                VStack(spacing: 10) {
+                    Image("AppLogo")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 70, height: 70)
+                        .cornerRadius(14)
+                        .shadow(color: Color.black.opacity(0.15), radius: 5, y: 2)
                     
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(localIPs, id: \.self) { ip in
-                            HStack {
-                                Image(systemName: ip.hasPrefix("169.254") || ip.hasPrefix("172.20") ? "cable.connector" : "wifi")
-                                    .foregroundColor(.blue)
-                                    .font(.system(size: 12))
-                                Text(ip)
-                                    .font(.system(size: 13, design: .monospaced))
-                                    .foregroundColor(.primary)
-                                Spacer()
+                    Text("ScreenCast")
+                        .font(.system(size: 26, weight: .bold, design: .rounded))
+                        .foregroundStyle(.linearGradient(colors: [.primary, .secondary], startPoint: .top, endPoint: .bottom))
+                    Text("VIRTUAL DISPLAY CONTROLLER")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .tracking(2)
+                }
+                
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(statusColor)
+                        .frame(width: 8, height: 8)
+                    Text(server.status)
+                        .font(.system(size: 13, weight: .medium, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.secondary.opacity(0.08))
+                .cornerRadius(20)
+                
+                if !localIPs.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("AVAILABLE INTERFACES")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(.secondary)
+                            .tracking(1)
+                        
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(localIPs, id: \.self) { ip in
+                                HStack {
+                                    Image(systemName: ip.hasPrefix("169.254") || ip.hasPrefix("172.20") ? "cable.connector" : "wifi")
+                                        .foregroundColor(.blue)
+                                        .font(.system(size: 12))
+                                    Text(ip)
+                                        .font(.system(size: 13, design: .monospaced))
+                                        .foregroundColor(.primary)
+                                    Spacer()
+                                }
                             }
                         }
                     }
+                    .padding(14)
+                    .background(Color.secondary.opacity(0.05))
+                    .cornerRadius(12)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
+                    )
                 }
-                .padding(14)
-                .background(Color.secondary.opacity(0.05))
-                .cornerRadius(12)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
-                )
-            }
-            
-            VStack(spacing: 12) {
-                Text("VIRTUAL DISPLAY LIVE STREAM")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundColor(.secondary)
-                    .tracking(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(Color.black)
-                        .aspectRatio(4/3, contentMode: .fit)
-                        .overlay(
-                            Group {
-                                if let image = engine.currentFrame {
-                                    Image(image, scale: 1.0, label: Text("Virtual Screen Output"))
-                                        .resizable()
-                                        .aspectRatio(contentMode: .fit)
-                                        .cornerRadius(8)
-                                        .padding(4)
-                                } else {
-                                    VStack(spacing: 10) {
-                                        Image(systemName: "display.trianglebadge.exclamationmark")
-                                            .font(.system(size: 28))
-                                            .foregroundColor(.secondary.opacity(0.5))
-                                        Text("Waiting for connection...")
-                                            .font(.system(size: 12))
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-                            }
-                        )
+                if server.status == "Connected" {
+                    Button(action: {
+                        server.disconnect()
+                    }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "power")
+                            Text("Disconnect")
+                                .font(.system(size: 14, weight: .bold))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(Color.red)
+                        .foregroundColor(.white)
+                        .cornerRadius(12)
+                        .shadow(color: Color.red.opacity(0.3), radius: 8, y: 3)
+                    }
+                    .buttonStyle(.plain)
+                    .transition(.opacity)
                 }
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
-                )
             }
+            .padding(24)
+            .frame(width: 360, height: 350)
+            
+            Button(action: {
+                showInfo = true
+            }) {
+                Image(systemName: "info.circle")
+                    .font(.title3)
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .padding(16)
         }
-        .padding(24)
-        .frame(width: 360, height: 480)
+        .sheet(isPresented: $showInfo) {
+            InfoSheet()
+        }
         .onAppear {
             localIPs = getLocalIPAddresses()
             engine.server = server
