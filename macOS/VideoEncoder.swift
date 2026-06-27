@@ -32,6 +32,14 @@ class VideoEncoder {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 30 as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 30 as CFNumber)
         
+        let bitrate = 4_000_000 as CFNumber
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate)
+        
+        let limitBytes = (4_000_000 / 8) as CFNumber
+        let limitDuration = 1.0 as CFNumber
+        let limitsArray = [limitBytes, limitDuration] as CFArray
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limitsArray)
+        
         VTCompressionSessionPrepareToEncodeFrames(session)
     }
     

@@ -5,6 +5,69 @@ import CoreMedia
 import VideoToolbox
 import Network
 
+class VirtualDisplayManager {
+    private var display: NSObject?
+    var displayID: CGDirectDisplayID?
+    
+    func createDisplay() {
+        print("🖥️ VDM: Starting virtual display creation...")
+        guard let DescriptorClass = NSClassFromString("CGVirtualDisplayDescriptor") as? NSObject.Type,
+              let ModeClass = NSClassFromString("CGVirtualDisplayMode") as? NSObject.Type,
+              let SettingsClass = NSClassFromString("CGVirtualDisplaySettings") as? NSObject.Type,
+              let DisplayClass = NSClassFromString("CGVirtualDisplay") as? NSObject.Type else {
+            print("🖥️ VDM: Failed to lookup private display classes!")
+            return
+        }
+        
+        let descriptor = DescriptorClass.init()
+        descriptor.setValue("Screenshare Virtual Monitor", forKey: "name")
+        descriptor.setValue(2048 as UInt32, forKey: "maxPixelsWide")
+        descriptor.setValue(1536 as UInt32, forKey: "maxPixelsHigh")
+        descriptor.setValue(CGSize(width: 400, height: 300), forKey: "sizeInMillimeters")
+        descriptor.setValue(0x1234 as UInt32, forKey: "vendorID")
+        descriptor.setValue(0x5678 as UInt32, forKey: "productID")
+        descriptor.setValue(0x0001 as UInt32, forKey: "serialNum")
+        descriptor.setValue(DispatchQueue(label: "com.aditya.screenshare.display"), forKey: "queue")
+        
+        let mode = ModeClass.init()
+        mode.setValue(2048 as CGFloat, forKey: "width")
+        mode.setValue(1536 as CGFloat, forKey: "height")
+        mode.setValue(60.0 as Double, forKey: "refreshRate")
+        
+        let settings = SettingsClass.init()
+        settings.setValue([mode], forKey: "modes")
+        settings.setValue(1 as UInt32, forKey: "hiDPI")
+        
+        guard let allocated = DisplayClass.perform(Selector(("alloc")))?
+            .takeUnretainedValue() as? NSObject else {
+            print("🖥️ VDM: Alloc failed!")
+            return
+        }
+        
+        guard let initialized = allocated.perform(Selector(("initWithDescriptor:")), with: descriptor)?
+            .takeRetainedValue() as? NSObject else {
+            print("🖥️ VDM: Init with descriptor failed!")
+            return
+        }
+        
+        _ = initialized.perform(Selector(("applySettings:")), with: settings)
+        
+        self.display = initialized
+        
+        if let dID = initialized.value(forKey: "displayID") as? UInt32 {
+            self.displayID = CGDirectDisplayID(dID)
+            print("🖥️ VDM: Created display successfully with ID: \(dID)")
+        } else {
+            print("🖥️ VDM: displayID property was nil!")
+        }
+    }
+    
+    func destroyDisplay() {
+        display = nil
+        displayID = nil
+    }
+}
+
 class MacServer: ObservableObject {
     private var listener: NWListener?
     @Published var connection: NWConnection?
@@ -43,7 +106,6 @@ class MacServer: ObservableObject {
         self.connection = connection
         connection.stateUpdateHandler = { [weak self] state in
             DispatchQueue.main.async {
-                print("🖥️ Server connection state: \(state)")
                 switch state {
                 case .ready:
                     self?.status = "Connected"
@@ -70,7 +132,7 @@ class MacServer: ObservableObject {
                 self?.handleInputPacket(data)
                 self?.receive()
             } else if isComplete {
-                print("🖥️ Server connection closed by client")
+                self?.connection = nil
             } else if error == nil {
                 self?.receive()
             }
@@ -124,28 +186,53 @@ class CaptureEngine: NSObject, ObservableObject, SCStreamOutput {
     private var stream: SCStream?
     private let queue = DispatchQueue(label: "video-capture-queue")
     private let encoder = VideoEncoder()
+    private let displayManager = VirtualDisplayManager()
     var server: MacServer?
     
     func startCapture() async {
+        print("🖥️ CaptureEngine: startCapture() entered")
         guard CGPreflightScreenCaptureAccess() else {
+            print("🖥️ CaptureEngine: Screen capture access not authorized")
             CGRequestScreenCaptureAccess()
             return
         }
+        
+        displayManager.createDisplay()
+        guard let virtualDisplayID = displayManager.displayID else {
+            print("🖥️ CaptureEngine: No displayID returned from displayManager")
+            return
+        }
+        print("🖥️ CaptureEngine: Virtual display ID is \(virtualDisplayID). Querying SCShareableContent...")
+        
         do {
-            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            guard let display = content.displays.first else { return }
+            var display: SCDisplay? = nil
+            for i in 0..<10 {
+                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                display = content.displays.first(where: { $0.displayID == virtualDisplayID })
+                if display != nil {
+                    print("🖥️ CaptureEngine: Found virtual display on attempt \(i + 1)")
+                    break
+                }
+                print("🖥️ CaptureEngine: Virtual display not found yet on attempt \(i + 1). Retrying...")
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
             
-            let filter = SCContentFilter(display: display, excludingWindows: [])
+            guard let activeDisplay = display else {
+                print("🖥️ CaptureEngine: Virtual display not found in ScreenCaptureKit list after 10 retries")
+                return
+            }
+            
+            let filter = SCContentFilter(display: activeDisplay, excludingWindows: [])
             let config = SCStreamConfiguration()
-            config.width = Int(display.width)
-            config.height = Int(display.height)
+            config.width = 2048
+            config.height = 1536
             config.pixelFormat = kCVPixelFormatType_32BGRA
             config.queueDepth = 5
             
             stream = SCStream(filter: filter, configuration: config, delegate: nil)
             try stream?.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
             
-            encoder.start(width: Int32(display.width), height: Int32(display.height))
+            encoder.start(width: 2048, height: 1536)
             encoder.onEncodedData = { [weak self] data in
                 self?.server?.send(data: data)
             }
@@ -161,6 +248,7 @@ class CaptureEngine: NSObject, ObservableObject, SCStreamOutput {
             try await stream?.stopCapture()
             stream = nil
             encoder.stop()
+            displayManager.destroyDisplay()
         } catch {
             print(error)
         }
@@ -181,9 +269,34 @@ class CaptureEngine: NSObject, ObservableObject, SCStreamOutput {
     }
 }
 
+func getLocalIPAddresses() -> [String] {
+    var addresses = [String]()
+    var ifaddr: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&ifaddr) == 0 else { return [] }
+    guard let firstAddr = ifaddr else { return [] }
+    
+    for ptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
+        let flags = Int32(ptr.pointee.ifa_flags)
+        var addr = ptr.pointee.ifa_addr.pointee
+        
+        if (flags & IFF_LOOPBACK) == 0 {
+            if addr.sa_family == UInt8(AF_INET) {
+                var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                if getnameinfo(&addr, socklen_t(addr.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
+                    let address = String(cString: hostname)
+                    addresses.append(address)
+                }
+            }
+        }
+    }
+    freeifaddrs(ifaddr)
+    return addresses
+}
+
 struct MirrorView: View {
     @StateObject private var server = MacServer()
     @StateObject private var engine = CaptureEngine()
+    @State private var localIPs: [String] = []
     
     var body: some View {
         VStack(spacing: 20) {
@@ -193,6 +306,21 @@ struct MirrorView: View {
             
             Text("Status: \(server.status)")
                 .foregroundColor(.secondary)
+            
+            if !localIPs.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Connection Options (Enter on iPad):")
+                        .font(.caption)
+                        .bold()
+                    ForEach(localIPs, id: \.self) { ip in
+                        Text("• \(ip)")
+                            .font(.system(.body, design: .monospaced))
+                    }
+                }
+                .padding(10)
+                .background(Color.black.opacity(0.1))
+                .cornerRadius(6)
+            }
             
             if let image = engine.currentFrame {
                 Image(image, scale: 1.0, label: Text("Screen Preview"))
@@ -206,8 +334,9 @@ struct MirrorView: View {
             }
         }
         .padding()
-        .frame(width: 400, height: 350)
+        .frame(width: 400, height: 450)
         .onAppear {
+            localIPs = getLocalIPAddresses()
             engine.server = server
             server.onConnectionReady = {
                 Task {
