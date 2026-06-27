@@ -43,10 +43,12 @@ class MacServer: ObservableObject {
         self.connection = connection
         connection.stateUpdateHandler = { [weak self] state in
             DispatchQueue.main.async {
+                print("🖥️ Server connection state: \(state)")
                 switch state {
                 case .ready:
                     self?.status = "Connected"
                     self?.onConnectionReady?()
+                    self?.receive()
                 case .failed(let error):
                     self?.status = "Connection failed: \(error.localizedDescription)"
                     self?.connection = nil
@@ -59,6 +61,54 @@ class MacServer: ObservableObject {
             }
         }
         connection.start(queue: .main)
+    }
+    
+    private func receive() {
+        guard let connection = connection else { return }
+        connection.receive(minimumIncompleteLength: 9, maximumLength: 9) { [weak self] data, _, isComplete, error in
+            if let data = data, data.count == 9 {
+                self?.handleInputPacket(data)
+                self?.receive()
+            } else if isComplete {
+                print("🖥️ Server connection closed by client")
+            } else if error == nil {
+                self?.receive()
+            }
+        }
+    }
+    
+    private func handleInputPacket(_ data: Data) {
+        let type = data[0]
+        let xBytes = data.subdata(in: 1..<5)
+        let yBytes = data.subdata(in: 5..<9)
+        
+        let xNorm = xBytes.withUnsafeBytes { $0.load(as: Float.self) }
+        let yNorm = yBytes.withUnsafeBytes { $0.load(as: Float.self) }
+        
+        guard let mainDisplay = NSScreen.main else { return }
+        let screenFrame = mainDisplay.frame
+        let targetX = CGFloat(xNorm) * screenFrame.width
+        let targetY = CGFloat(yNorm) * screenFrame.height
+        let point = CGPoint(x: targetX, y: targetY)
+        
+        let source = CGEventSource(stateID: .combinedSessionState)
+        
+        switch type {
+        case 0:
+            let event = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)
+            event?.post(tap: .cghidEventTap)
+        case 1:
+            let event = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)
+            event?.post(tap: .cghidEventTap)
+        case 2:
+            let event = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)
+            event?.post(tap: .cghidEventTap)
+        case 3:
+            let event = CGEvent(mouseEventSource: source, mouseType: .leftMouseDragged, mouseCursorPosition: point, mouseButton: .left)
+            event?.post(tap: .cghidEventTap)
+        default:
+            break
+        }
     }
     
     func send(data: Data) {

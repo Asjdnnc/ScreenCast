@@ -150,12 +150,14 @@ class IPadClient: ObservableObject {
     var decoder: VideoDecoder?
     
     func connect(host: String, port: UInt16) {
+        print("📱 Client connecting to \(host):\(port)...")
         let nwHost = NWEndpoint.Host(host)
         let nwPort = NWEndpoint.Port(rawValue: port)!
         
         connection = NWConnection(host: nwHost, port: nwPort, using: .tcp)
         connection?.stateUpdateHandler = { [weak self] state in
             DispatchQueue.main.async {
+                print("📱 Client connection state changed to: \(state)")
                 switch state {
                 case .ready:
                     self?.status = "Connected"
@@ -173,8 +175,18 @@ class IPadClient: ObservableObject {
     }
     
     func disconnect() {
+        print("📱 Client disconnecting...")
         connection?.cancel()
         connection = nil
+    }
+    
+    func send(data: Data) {
+        guard let connection = connection else { return }
+        connection.send(content: data, completion: .contentProcessed { error in
+            if let error = error {
+                print("📱 Client send error: \(error)")
+            }
+        })
     }
     
     private func receive() {
@@ -188,11 +200,13 @@ class IPadClient: ObservableObject {
                            (UInt32(bytes[2]) << 8)  |
                            UInt32(bytes[3])
                 }
+                print("📱 Client expecting frame of length: \(length)")
                 self?.receiveFrame(length: Int(length))
             } else if isComplete {
+                print("📱 Client connection closed by server (EOF)")
                 self?.handleDisconnect()
-            } else if error == nil {
-                self?.receive()
+            } else if let error = error {
+                print("📱 Client header read error: \(error)")
             }
         }
     }
@@ -201,12 +215,14 @@ class IPadClient: ObservableObject {
         guard let connection = connection else { return }
         connection.receive(minimumIncompleteLength: length, maximumLength: length) { [weak self] data, _, isComplete, error in
             if let data = data, data.count == length {
+                print("📱 Client received full frame (\(data.count) bytes)")
                 self?.decoder?.decode(frameData: data)
                 self?.receive()
             } else if isComplete {
+                print("📱 Client connection closed while reading frame body")
                 self?.handleDisconnect()
-            } else if error == nil {
-                self?.receive()
+            } else if let error = error {
+                print("📱 Client body read error: \(error)")
             }
         }
     }
@@ -281,11 +297,40 @@ struct ContentView: View {
                 .disabled(client.status != "Connected")
             }
             
-            VideoDisplayView(videoLayer: displayLayer)
-                .background(Color.black)
-                .cornerRadius(12)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            GeometryReader { geometry in
+                VideoDisplayView(videoLayer: displayLayer)
+                    .background(Color.black)
+                    .cornerRadius(12)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .gesture(
+                        DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                            .onChanged { value in
+                                let eventType: UInt8 = value.translation == .zero ? 1 : 3
+                                sendTouch(at: value.location, in: geometry.size, type: eventType)
+                            }
+                            .onEnded { value in
+                                sendTouch(at: value.location, in: geometry.size, type: 2)
+                            }
+                    )
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .padding()
+    }
+    
+    private func sendTouch(at point: CGPoint, in size: CGSize, type: UInt8) {
+        guard size.width > 0, size.height > 0 else { return }
+        let normX = Float(point.x / size.width)
+        let normY = Float(point.y / size.height)
+        
+        var packet = Data()
+        packet.append(type)
+        
+        var x = normX
+        var y = normY
+        packet.append(Data(bytes: &x, count: 4))
+        packet.append(Data(bytes: &y, count: 4))
+        
+        client.send(data: packet)
     }
 }
