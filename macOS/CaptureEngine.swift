@@ -75,10 +75,14 @@ class MacServer: ObservableObject {
     var onConnectionReady: (() -> Void)?
     
     let port: NWEndpoint.Port = 12345
+    private var udpListener: NWListener?
+    private var broadcastConnection: NWConnection?
     
     func start() {
+        startUDPListener()
         do {
             listener = try NWListener(using: .tcp, on: port)
+            listener?.service = NWListener.Service(name: "Mac Display Server", type: "_screenshare._tcp")
             listener?.stateUpdateHandler = { [weak self] state in
                 DispatchQueue.main.async {
                     switch state {
@@ -99,6 +103,35 @@ class MacServer: ObservableObject {
             listener?.start(queue: .main)
         } catch {
             status = "Start failed: \(error.localizedDescription)"
+        }
+    }
+    
+    private func startUDPListener() {
+        do {
+            let parameters = NWParameters.udp
+            parameters.allowLocalEndpointReuse = true
+            let listener = try NWListener(using: parameters, on: 12346)
+            self.broadcastConnection = nil
+            
+            listener.newConnectionHandler = { connection in
+                connection.stateUpdateHandler = { state in
+                    if case .ready = state {
+                        connection.receiveMessage { data, _, _, _ in
+                            if let data = data, let str = String(data: data, encoding: .utf8), str == "screenshare-client-request" {
+                                let replyData = "screenshare-server-response".data(using: .utf8)!
+                                connection.send(content: replyData, completion: .contentProcessed { _ in
+                                    connection.cancel()
+                                })
+                            }
+                        }
+                    }
+                }
+                connection.start(queue: .main)
+            }
+            self.udpListener = listener
+            listener.start(queue: .main)
+        } catch {
+            print("🖥️ MacServer: UDP Listener failed: \(error)")
         }
     }
     
@@ -299,42 +332,100 @@ struct MirrorView: View {
     @State private var localIPs: [String] = []
     
     var body: some View {
-        VStack(spacing: 20) {
-            Text("macOS Display Server")
-                .font(.title)
-                .bold()
+        VStack(spacing: 24) {
+            VStack(spacing: 6) {
+                Text("ScreenCast")
+                    .font(.system(size: 26, weight: .bold, design: .rounded))
+                    .foregroundStyle(.linearGradient(colors: [.primary, .secondary], startPoint: .top, endPoint: .bottom))
+                Text("VIRTUAL DISPLAY CONTROLLER")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.secondary)
+                    .tracking(2)
+            }
             
-            Text("Status: \(server.status)")
-                .foregroundColor(.secondary)
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
+                Text(server.status)
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Color.secondary.opacity(0.08))
+            .cornerRadius(20)
             
             if !localIPs.isEmpty {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Connection Options (Enter on iPad):")
-                        .font(.caption)
-                        .bold()
-                    ForEach(localIPs, id: \.self) { ip in
-                        Text("• \(ip)")
-                            .font(.system(.body, design: .monospaced))
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("AVAILABLE INTERFACES")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .tracking(1)
+                    
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(localIPs, id: \.self) { ip in
+                            HStack {
+                                Image(systemName: ip.hasPrefix("169.254") || ip.hasPrefix("172.20") ? "cable.connector" : "wifi")
+                                    .foregroundColor(.blue)
+                                    .font(.system(size: 12))
+                                Text(ip)
+                                    .font(.system(size: 13, design: .monospaced))
+                                    .foregroundColor(.primary)
+                                Spacer()
+                            }
+                        }
                     }
                 }
-                .padding(10)
-                .background(Color.black.opacity(0.1))
-                .cornerRadius(6)
+                .padding(14)
+                .background(Color.secondary.opacity(0.05))
+                .cornerRadius(12)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.secondary.opacity(0.1), lineWidth: 1)
+                )
             }
             
-            if let image = engine.currentFrame {
-                Image(image, scale: 1.0, label: Text("Screen Preview"))
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(height: 200)
-                    .cornerRadius(8)
-            } else {
-                Text("Capture inactive")
-                    .frame(height: 200)
+            VStack(spacing: 12) {
+                Text("VIRTUAL DISPLAY LIVE STREAM")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.secondary)
+                    .tracking(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color.black)
+                        .aspectRatio(4/3, contentMode: .fit)
+                        .overlay(
+                            Group {
+                                if let image = engine.currentFrame {
+                                    Image(image, scale: 1.0, label: Text("Virtual Screen Output"))
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fit)
+                                        .cornerRadius(8)
+                                        .padding(4)
+                                } else {
+                                    VStack(spacing: 10) {
+                                        Image(systemName: "display.trianglebadge.exclamationmark")
+                                            .font(.system(size: 28))
+                                            .foregroundColor(.secondary.opacity(0.5))
+                                        Text("Waiting for connection...")
+                                            .font(.system(size: 12))
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                            }
+                        )
+                }
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
+                )
             }
         }
-        .padding()
-        .frame(width: 400, height: 450)
+        .padding(24)
+        .frame(width: 360, height: 480)
         .onAppear {
             localIPs = getLocalIPAddresses()
             engine.server = server
@@ -343,12 +434,27 @@ struct MirrorView: View {
                     await engine.startCapture()
                 }
             }
+            server.onConnectionClosed = {
+                Task {
+                    await engine.stopCapture()
+                }
+            }
             server.start()
         }
         .onDisappear {
             Task {
                 await engine.stopCapture()
             }
+        }
+    }
+    
+    private var statusColor: Color {
+        if server.status == "Connected" {
+            return .green
+        } else if server.status.contains("Listening") {
+            return .blue
+        } else {
+            return .red
         }
     }
 }

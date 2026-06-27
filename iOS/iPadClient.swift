@@ -149,12 +149,9 @@ class IPadClient: ObservableObject {
     @Published var status: String = "Disconnected"
     var decoder: VideoDecoder?
     
-    func connect(host: String, port: UInt16) {
-        print("📱 Client connecting to \(host):\(port)...")
-        let nwHost = NWEndpoint.Host(host)
-        let nwPort = NWEndpoint.Port(rawValue: port)!
-        
-        connection = NWConnection(host: nwHost, port: nwPort, using: .tcp)
+    func connect(to endpoint: NWEndpoint) {
+        print("📱 Client connecting to \(endpoint)...")
+        connection = NWConnection(to: endpoint, using: .tcp)
         connection?.stateUpdateHandler = { [weak self] state in
             DispatchQueue.main.async {
                 print("📱 Client connection state changed to: \(state)")
@@ -215,14 +212,13 @@ class IPadClient: ObservableObject {
         guard let connection = connection else { return }
         connection.receive(minimumIncompleteLength: length, maximumLength: length) { [weak self] data, _, isComplete, error in
             if let data = data, data.count == length {
-                print("📱 Client received full frame (\(data.count) bytes)")
                 self?.decoder?.decode(frameData: data)
                 self?.receive()
             } else if isComplete {
-                print("📱 Client connection closed while reading frame body")
+                print("📱 Client connection closed by server (EOF) during frame read")
                 self?.handleDisconnect()
             } else if let error = error {
-                print("📱 Client body read error: \(error)")
+                print("📱 Client frame read error: \(error)")
             }
         }
     }
@@ -232,6 +228,24 @@ class IPadClient: ObservableObject {
             self.status = "Disconnected"
             self.connection = nil
         }
+    }
+    
+    private var browser: NWBrowser?
+    
+    func discoverAndConnect(preferUSB: Bool, completion: @escaping (NWEndpoint) -> Void) {
+        let parameters = NWParameters()
+        let browser = NWBrowser(for: .bonjour(type: "_screenshare._tcp", domain: nil), using: parameters)
+        self.browser = browser
+        
+        browser.browseResultsChangedHandler = { results, changes in
+            if let firstResult = results.first {
+                DispatchQueue.main.async {
+                    completion(firstResult.endpoint)
+                }
+                browser.cancel()
+            }
+        }
+        browser.start(queue: .main)
     }
 }
 
@@ -268,40 +282,16 @@ struct VideoDisplayView: UIViewRepresentable {
 struct ContentView: View {
     @StateObject private var client = IPadClient()
     @State private var hostAddress: String = "192.168.1.10"
+    @State private var showWiFiInput: Bool = false
+    @State private var showMenu: Bool = false
     private let displayLayer = AVSampleBufferDisplayLayer()
     
     var body: some View {
-        VStack(spacing: 20) {
-            Text("iPad Display Client")
-                .font(.title)
-                .bold()
-            
-            Text("Status: \(client.status)")
-                .foregroundColor(.secondary)
-            
-            HStack {
-                TextField("Server IP", text: $hostAddress)
-                    .keyboardType(.numbersAndPunctuation)
-                    .textFieldStyle(.roundedBorder)
-                    .autocapitalization(.none)
-                
-                Button("Connect") {
-                    client.decoder = VideoDecoder(displayLayer: displayLayer)
-                    client.connect(host: hostAddress, port: 12345)
-                }
-                .disabled(client.status == "Connected")
-                
-                Button("Disconnect") {
-                    client.disconnect()
-                }
-                .disabled(client.status != "Connected")
-            }
-            
+        ZStack(alignment: .leading) {
             GeometryReader { geometry in
                 VideoDisplayView(videoLayer: displayLayer)
                     .background(Color.black)
-                    .cornerRadius(12)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .edgesIgnoringSafeArea(.all)
                     .gesture(
                         DragGesture(minimumDistance: 0, coordinateSpace: .local)
                             .onChanged { value in
@@ -313,9 +303,138 @@ struct ContentView: View {
                             }
                     )
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .edgesIgnoringSafeArea(.all)
+            
+            if client.status == "Connected" {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Button(action: {
+                            withAnimation {
+                                showMenu.toggle()
+                            }
+                        }) {
+                            Image(systemName: "line.3.horizontal")
+                                .font(.title)
+                                .padding()
+                                .background(Color.black.opacity(0.6))
+                                .foregroundColor(.white)
+                                .clipShape(Circle())
+                        }
+                        .padding()
+                        Spacer()
+                    }
+                }
+            }
+            
+            if client.status != "Connected" || showMenu {
+                Color.black.opacity(0.4)
+                    .edgesIgnoringSafeArea(.all)
+                    .onTapGesture {
+                        if client.status == "Connected" {
+                            withAnimation {
+                                showMenu = false
+                            }
+                        }
+                    }
+                
+                VStack(spacing: 20) {
+                    Text("ScreenCast")
+                        .font(.title)
+                        .bold()
+                    
+                    Text("Status: \(client.status)")
+                        .foregroundColor(.secondary)
+                    
+                    VStack(spacing: 12) {
+                        Button(action: {
+                            client.status = "Discovering USB..."
+                            client.discoverAndConnect(preferUSB: true) { endpoint in
+                                client.decoder = VideoDecoder(displayLayer: displayLayer)
+                                client.connect(to: endpoint)
+                                withAnimation { showMenu = false }
+                            }
+                        }) {
+                            HStack {
+                                Image(systemName: "cable.connector")
+                                Text("Connect via USB Cable")
+                                    .bold()
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.blue)
+                            .foregroundColor(.white)
+                            .cornerRadius(10)
+                        }
+                        
+                        Button(action: {
+                            withAnimation {
+                                showWiFiInput.toggle()
+                            }
+                        }) {
+                            HStack {
+                                Image(systemName: "wifi")
+                                Text("Connect via Wi-Fi")
+                                    .bold()
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.secondary.opacity(0.15))
+                            .foregroundColor(.primary)
+                            .cornerRadius(10)
+                        }
+                        
+                        if showWiFiInput {
+                            HStack {
+                                TextField("Mac Wi-Fi IP Address", text: $hostAddress)
+                                    .keyboardType(.numbersAndPunctuation)
+                                    .textFieldStyle(.roundedBorder)
+                                    .autocapitalization(.none)
+                                
+                                Button(action: {
+                                    client.decoder = VideoDecoder(displayLayer: displayLayer)
+                                    let host = NWEndpoint.Host(hostAddress)
+                                    let port = NWEndpoint.Port(rawValue: 12345)!
+                                    client.connect(to: .hostPort(host: host, port: port))
+                                    withAnimation { showMenu = false }
+                                }) {
+                                    Text("Connect")
+                                        .bold()
+                                }
+                                .padding(.horizontal)
+                            }
+                            .padding(.top, 5)
+                            .transition(.opacity)
+                        }
+                    }
+                    
+                    if client.status == "Connected" {
+                        Button(action: {
+                            client.disconnect()
+                            withAnimation { showMenu = false }
+                        }) {
+                            HStack {
+                                Image(systemName: "power")
+                                Text("Disconnect")
+                                    .bold()
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.red)
+                            .foregroundColor(.white)
+                            .cornerRadius(10)
+                        }
+                    }
+                }
+                .padding()
+                .frame(width: 320)
+                .background(Color(UIColor.systemBackground))
+                .cornerRadius(16)
+                .shadow(radius: 10)
+                .padding()
+                .transition(.move(edge: .leading))
+            }
         }
-        .padding()
     }
     
     private func sendTouch(at point: CGPoint, in size: CGSize, type: UInt8) {
